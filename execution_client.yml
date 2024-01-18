@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deployer Script
+
+Resources:
+
+  EthereumInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: 'ami-0c7217cdde317cfec'  # ImageID valid only in us-east-1 region
+      InstanceType: t2.large
+      KeyName: test         # <-- Change to use your key-pair name
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: false
+            VolumeSize: 100
+      Tags:
+        - Key: Node
+          Value: geth
+      SecurityGroupIds:
+        - !Ref EthereumSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          wget https://github.com/sigp/lighthouse/releases/download/v4.5.0/lighthouse-v4.5.0-x86_64-unknown-linux-gnu-portable.tar.gz
+          tar -xvf lighthouse-v4.5.0-x86_64-unknown-linux-gnu-portable.tar.gz && mv lighthouse /usr/bin   && rm -rf lighthouse-v4.5.0-x86_64-unknown-linux-gnu-portable.tar.gz 
+          wget https://gethstore.blob.core.windows.net/builds/geth-linux-amd64-1.13.10-bc0be1b1.tar.gz
+          tar -xvf geth-linux-amd64-1.13.10-bc0be1b1.tar.gz && mv geth-linux-amd64-1.13.10-bc0be1b1/geth /usr/bin && rm -rf geth-linux-amd64-1.13.10-bc0be1b1.tar.gz
+
+          sudo tee /etc/systemd/system/execution_client.service > /dev/null <<EOF
+          [Unit]
+          Description=Ethereum go client
+          After=syslog.target network.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          UserGroup=ubuntu
+          ExecStart=/usr/bin/geth --authrpc.jwtsecret /home/ubuntu/execution/geth/jwtsecret --datadir /home/ubuntu/execution --mainnet --http --metrics.addr 0.0.0.0 --metrics
+          KillMode=process
+          KillSignal=SIGINT
+          TimeoutStopSec=90
+          Restart=on-failure
+          RestartSec=10s
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          sudo tee /etc/systemd/system/consensus_client.service > /dev/null <<EOF
+          [Unit]
+          Description=Lighthouse Consensus client
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          UserGroup=ubuntu
+          ExecStart=/usr/bin/lighthouse --network mainnet beacon_node --http \
+              --execution-endpoint http://localhost:8551 \
+              --metrics --metrics-address 0.0.0.0 \
+              --execution-jwt /home/ubuntu/execution/geth/jwtsecret \
+              --datadir /home/ubuntu/consensus \
+              --checkpoint-sync-url https://mainnet.checkpoint.sigp.io/
+          KillMode=process
+          KillSignal=SIGINT
+          TimeoutStopSec=90
+          Restart=on-failure
+          RestartSec=10s
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          sudo systemctl daemon-reload
+          sudo service consensus_client start
+
+          sudo systemctl daemon-reload
+          sudo service execution_client start
+  EthereumElasticIP:                                                   # Elastic IP Block of Execution Client
+    Type: 'AWS::EC2::EIPAssociation'
+    Properties:
+      AllocationId: eipalloc-0bc31e14c52e7c4ee
+      InstanceId: !Ref  EthereumInstance
+
+
+  MonitoringStack:                                                                      
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: 'ami-0c7217cdde317cfec'  # ImageID valid only in us-east-1 region
+      InstanceType: t2.micro
+      KeyName: Monitoring # <-- Change to use your key-pair name
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: false
+            VolumeSize: 20
+      Tags:
+        - Key: MonitoringStack
+          Value: PrometheusGrafana
+
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          wget https://github.com/prometheus/prometheus/releases/download/v2.36.2/prometheus-2.36.2.linux-amd64.tar.gz
+          wget -q -O /usr/share/keyrings/grafana.key https://apt.grafana.com/gpg.key
+          apt-get update -y && apt-get install grafana
+          
+          tar -xvf prometheus-2.36.2.linux-amd64.tar.gz && mkdir -p /etc/prometheus &&  mv prometheus-2.36.2.linux-amd64/prometheus /usr/local/bin  && rm -rf prometheus-2.36.2.linux-amd64.tar.gz
+          mkdir -p /var/lib/prometheus && mv prometheus-2.36.2.linux-amd64/prometheus.yml /etc/prometheus
+          
+          
+          sudo tee /etc/systemd/system/prometheus.service > /dev/null <<EOF
+          [Unit]
+          Description=Prometheus
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          User=ubuntu
+          Group=ubuntu
+          Type=simple
+          ExecStart=/usr/local/bin/prometheus \
+              --config.file /etc/prometheus/prometheus.yml \
+              --storage.tsdb.path /var/lib/prometheus/ \
+              --web.console.templates=/etc/prometheus/consoles \
+              --web.console.libraries=/etc/prometheus/console_libraries \
+              --web.enable-admin-api
+
+          [Install]
+          WantedBy=multi-user.target
+          sudo systemctl daemon-reload
+          sudo service prometheus start
+          sudo systemctl start grafana-server
+
+
+  MonitoringStackElasticIP:                                          # Elastic IP Block of MonitoringStack
+    Type: 'AWS::EC2::EIPAssociation'
+    Properties:
+      AllocationId: eipalloc-0df997a673cf92840                       
+      InstanceId: !Ref  MonitoringStack
+
+  EthereumSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: !Join ["-", [ethereum-security-group, dev]]
+      GroupDescription: 'Security group for Ethereum instance'
+      SecurityGroupIngress:
+        - CidrIp: '0.0.0.0/0'
+          FromPort: 30303  # P2P port
+          ToPort: 30303
+          IpProtocol: tcp
+        - CidrIp: '0.0.0.0/0'
+          FromPort: 8545  # API port
+          ToPort: 8545
+          IpProtocol: tcp
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+        - CidrIp: '52.6.197.244/32'
+          FromPort: 6060  # Geth metrics
+          ToPort: 6060
+          IpProtocol: tcp
+        - CidrIp: '52.6.197.244/32'
+          FromPort: 5054  
+          ToPort: 5054
+          IpProtocol: tcp
+        - IpProtocol: tcp
+          FromPort: 9100             #Node Exporter Metrics
+          ToPort: 9100
+          CidrIp: '52.6.197.244/32'
+        
+        
+
+  
+
+  EthereumInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref EthereumIAMRole
+
+  EthereumIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: 'CloudWatchLogsPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: '*'
+
+# Add CloudWatch Log Group and Log Stream for Ethereum logs
+  EthereumLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: 'geth'
+
+  EthereumLogStream:
+    Type: 'AWS::Logs::LogStream'
+    Properties:
+      LogGroupName: !Ref EthereumLogGroup
+      LogStreamName: 'geth-instance-logs'
