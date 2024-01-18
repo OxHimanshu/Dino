@@ -48,7 +48,7 @@ Resources:
           WantedBy=multi-user.target
           EOF
 
-          sudo tee /etc/systemd/system/consensus_client.service > /dev/null <<EOF
+          sudo tee /etc/systemd/system/consensus_client.service > /dev/null <<EOF    
           [Unit]
           Description=Lighthouse Consensus client
 
@@ -73,9 +73,11 @@ Resources:
           EOF
           sudo systemctl daemon-reload
           sudo service consensus_client start
-
+          sudo systemctl enable execution_client
+          sudo systemctl enable consensus_client
           sudo systemctl daemon-reload
           sudo service execution_client start
+
   EthereumElasticIP:                                                   # Elastic IP Block of Execution Client
     Type: 'AWS::EC2::EIPAssociation'
     Properties:
@@ -92,23 +94,26 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            DeleteOnTermination: false
-            VolumeSize: 20
+            DeleteOnTermination: true
+            VolumeSize: 40
       Tags:
         - Key: MonitoringStack
           Value: PrometheusGrafana
-
+      SecurityGroupIds:
+        - !Ref MonitoringStackGroup
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          wget https://github.com/prometheus/prometheus/releases/download/v2.36.2/prometheus-2.36.2.linux-amd64.tar.gz
-          wget -q -O /usr/share/keyrings/grafana.key https://apt.grafana.com/gpg.key
-          apt-get update -y && apt-get install grafana
-          
-          tar -xvf prometheus-2.36.2.linux-amd64.tar.gz && mkdir -p /etc/prometheus &&  mv prometheus-2.36.2.linux-amd64/prometheus /usr/local/bin  && rm -rf prometheus-2.36.2.linux-amd64.tar.gz
-          mkdir -p /var/lib/prometheus && mv prometheus-2.36.2.linux-amd64/prometheus.yml /etc/prometheus
-          
-          
+          apt-get update -y
+          wget https://github.com/prometheus/prometheus/releases/download/v2.43.0/prometheus-2.43.0.linux-amd64.tar.gz
+          tar -xvf prometheus-2.43.0.linux-amd64.tar.gz && mkdir -p /etc/prometheus &&  mv prometheus-2.43.0.linux-amd64/prometheus /usr/local/bin  && rm -rf prometheus-2.43.0.linux-amd64.tar.gz
+          sudo mkdir -p /var/lib/prometheus && sudo mv prometheus-2.43.0.linux-amd64/prometheus.yml  /etc/prometheus
+          sudo chown -R ubuntu:ubuntu /etc/prometheus && sudo chown -R ubuntu:ubuntu /var/lib/prometheus
+          sudo mkdir -p /etc/apt/keyrings/ 
+          wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/grafana.gpg > /dev/null 
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+          sudo apt update && sudo apt install -y grafana
+
           sudo tee /etc/systemd/system/prometheus.service > /dev/null <<EOF
           [Unit]
           Description=Prometheus
@@ -121,23 +126,37 @@ Resources:
           Type=simple
           ExecStart=/usr/local/bin/prometheus \
               --config.file /etc/prometheus/prometheus.yml \
-              --storage.tsdb.path /var/lib/prometheus/ \
+              --storage.tsdb.path /var/lib/prometheus/  \
               --web.console.templates=/etc/prometheus/consoles \
               --web.console.libraries=/etc/prometheus/console_libraries \
               --web.enable-admin-api
 
           [Install]
           WantedBy=multi-user.target
+          EOF
           sudo systemctl daemon-reload
-          sudo service prometheus start
           sudo systemctl start grafana-server
-
+          sudo systemctl enable grafana-server
+          sudo systemctl enable prometheus
+          sudo service prometheus restart
 
   MonitoringStackElasticIP:                                          # Elastic IP Block of MonitoringStack
     Type: 'AWS::EC2::EIPAssociation'
     Properties:
       AllocationId: eipalloc-0df997a673cf92840                       
       InstanceId: !Ref  MonitoringStack
+
+  MonitoringStackGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: !Join ["-", [monitoringStack-security-group, dev]]
+      GroupDescription: 'Security group for monitoringStack instance'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+  
 
   EthereumSecurityGroup:
     Type: 'AWS::EC2::SecurityGroup'
